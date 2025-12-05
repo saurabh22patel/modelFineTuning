@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Model and dataset files
+models/
+datasets/
+checkpoints/
+cache/
+*.bin
+*.safetensors
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Logs
+logs/
+*.log
+*.out
+*.err
+
+# SLURM
+slurm-*.out
+slurm-*.err
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+gpu_stats.json
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+

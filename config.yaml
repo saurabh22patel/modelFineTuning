@@ -1,0 +1,50 @@
+# Training Configuration
+model:
+  name: "meta-llama/Llama-2-7b-hf"  # Change to your model
+  path: "./models"  # Local path after download
+  use_flash_attention: true
+  gradient_checkpointing: true
+
+dataset:
+  name: "wikitext"  # Change to your dataset
+  path: "./datasets/dataset"  # Local path after download
+  max_length: 2048
+  batch_size_per_device: 4  # Adjust based on GPU memory
+  gradient_accumulation_steps: 8  # Effective batch size = batch_size_per_device * num_gpus * gradient_accumulation_steps
+
+training:
+  num_epochs: 3
+  learning_rate: 2.0e-5
+  warmup_steps: 100
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_scheduler_type: "cosine"
+  save_steps: 500
+  eval_steps: 500
+  logging_steps: 10
+  output_dir: "./checkpoints"
+  save_total_limit: 3
+
+# FSDP Configuration for distributed training
+fsdp:
+  sharding_strategy: "FULL_SHARD"  # Options: FULL_SHARD, SHARD_GRAD_OP, NO_SHARD
+  cpu_offload: false
+  mixed_precision: true
+  use_orig_params: true
+  limit_all_gathers: true
+
+# MLflow Configuration
+mlflow:
+  tracking_uri: "file:./mlruns"  # Change to remote URI if needed
+  experiment_name: "llm_fine_tuning"
+  log_model: true
+  log_artifacts: true
+
+# Performance optimization
+performance:
+  dataloader_num_workers: 4
+  pin_memory: true
+  prefetch_factor: 2
+  use_cpu_offload: false
+  activation_checkpointing: true
+
