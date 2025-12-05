@@ -16,8 +16,8 @@ mkdir -p logs
 # module load python/3.10
 # module load cuda/11.8
 
-# Activate virtual environment if using one
-# source venv/bin/activate
+# Activate virtual environment
+source ~/llmtune/bin/activate
 
 # Install dependencies if needed
 # pip install -r requirements.txt

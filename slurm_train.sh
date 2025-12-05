@@ -21,8 +21,8 @@ mkdir -p logs
 # module load cuda/11.8
 # module load nccl
 
-# Activate virtual environment if using one
-# source venv/bin/activate
+# Activate virtual environment
+source ~/llmtune/bin/activate
 
 # Set environment variables for distributed training
 export MASTER_PORT=29500

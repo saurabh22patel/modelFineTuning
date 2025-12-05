@@ -15,8 +15,8 @@ mkdir -p logs
 # Load necessary modules (adjust based on your cluster)
 # module load python/3.10
 
-# Activate virtual environment if using one
-# source venv/bin/activate
+# Activate virtual environment
+source ~/llmtune/bin/activate
 
 # Download dataset
 python download_dataset.py \
