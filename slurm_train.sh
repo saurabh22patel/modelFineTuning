@@ -39,9 +39,9 @@ if [ -n "$VENV_PATH" ]; then
         echo "Please check your config.yaml environment.venv_path setting"
         exit 1
     fi
-elif [ -f "./venv/bin/activate" ]; then
-    # Use project-local venv
-    source ./venv/bin/activate
+elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    # Use project-local venv (relative to script directory)
+    source "$SCRIPT_DIR/venv/bin/activate"
     echo "Activated project-local virtual environment"
 elif [ -f "$HOME/llmtune/bin/activate" ]; then
     # Fallback to ~/llmtune venv (common on SLURM clusters)
@@ -108,7 +108,14 @@ echo "========================================="
 # Set CUDA device
 export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
 
+# Set MLflow environment variables if not already set (can be overridden by config.yaml)
+# These can be set before submitting the job or in config.yaml
+# export MLFLOW_TRACKING_URI="http://your-mlflow-server:5000"
+# export MLFLOW_USERNAME="your-username"
+# export MLFLOW_PASSWORD="your-password"
+
 # Run training
+# HF_TOKEN and MLflow credentials can be set as environment variables or in config.yaml
 srun python train.py \
     --config "${CONFIG_PATH:-$SCRIPT_DIR/config.yaml}" \
     --local_rank $SLURM_LOCALID

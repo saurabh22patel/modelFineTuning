@@ -9,8 +9,9 @@ import os
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
+from huggingface_hub import login
 
-def download_model(model_name: str, output_dir: str, cache_dir: str = None):
+def download_model(model_name: str, output_dir: str, cache_dir: str = None, hf_token: str = None):
     """
     Download a model from HuggingFace and save it locally.
     
@@ -18,12 +19,21 @@ def download_model(model_name: str, output_dir: str, cache_dir: str = None):
         model_name: HuggingFace model identifier (e.g., 'meta-llama/Llama-2-7b-hf')
         output_dir: Directory to save the model
         cache_dir: Optional cache directory for HuggingFace cache
+        hf_token: HuggingFace token for gated models (can also use HF_TOKEN env var)
     """
     print(f"Downloading model: {model_name}")
     print(f"Output directory: {output_dir}")
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
+    
+    # Authenticate with HuggingFace if token provided
+    token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token:
+        print("Authenticating with HuggingFace...")
+        login(token=token)
+    else:
+        print("Warning: No HuggingFace token provided. If model is gated, download will fail.")
     
     # Set cache directory if provided
     if cache_dir:
@@ -36,7 +46,8 @@ def download_model(model_name: str, output_dir: str, cache_dir: str = None):
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
             cache_dir=cache_dir,
-            trust_remote_code=True
+            trust_remote_code=True,
+            token=token
         )
         
         # Download model
@@ -46,7 +57,8 @@ def download_model(model_name: str, output_dir: str, cache_dir: str = None):
             cache_dir=cache_dir,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
-            low_cpu_mem_usage=True
+            low_cpu_mem_usage=True,
+            token=token
         )
         
         # Save model and tokenizer
@@ -81,7 +93,13 @@ if __name__ == "__main__":
         default=None,
         help="Cache directory for HuggingFace downloads (optional)"
     )
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="HuggingFace token for gated models (can also use HF_TOKEN env var)"
+    )
     
     args = parser.parse_args()
-    download_model(args.model_name, args.output_dir, args.cache_dir)
+    download_model(args.model_name, args.output_dir, args.cache_dir, args.hf_token)
 

@@ -33,9 +33,9 @@ if [ -n "$VENV_PATH" ]; then
         echo "Please check your config.yaml environment.venv_path setting"
         exit 1
     fi
-elif [ -f "./venv/bin/activate" ]; then
-    # Use project-local venv
-    source ./venv/bin/activate
+elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    # Use project-local venv (relative to script directory)
+    source "$SCRIPT_DIR/venv/bin/activate"
     echo "Activated project-local virtual environment"
 elif [ -f "$HOME/llmtune/bin/activate" ]; then
     # Fallback to ~/llmtune venv (common on SLURM clusters)
@@ -50,13 +50,15 @@ else
     exit 1
 fi
 
-# Download dataset
+# Download dataset with pre-tokenization (HF_TOKEN can be set as environment variable or in config.yaml)
 python download_dataset.py \
     --dataset_name "${DATASET_NAME:-wikitext}" \
-    --output_dir "${DATASET_OUTPUT_DIR:-./datasets}" \
-    --tokenizer_path "${TOKENIZER_PATH:-./models}" \
+    --output_dir "${DATASET_OUTPUT_DIR:-/root/data}" \
+    --tokenizer_path "${TOKENIZER_PATH:-/mnt/data/models}" \
+    --model_name "${MODEL_NAME:-meta-llama/Llama-3.1-70B-Instruct}" \
     --max_length "${MAX_LENGTH:-2048}" \
-    --split "${SPLIT:-train}"
+    --split "${SPLIT:-train}" \
+    --hf_token "${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN}}"
 
 echo "Dataset download completed!"
 

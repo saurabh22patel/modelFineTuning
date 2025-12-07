@@ -34,9 +34,9 @@ if [ -n "$VENV_PATH" ]; then
         echo "Please check your config.yaml environment.venv_path setting"
         exit 1
     fi
-elif [ -f "./venv/bin/activate" ]; then
-    # Use project-local venv
-    source ./venv/bin/activate
+elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
+    # Use project-local venv (relative to script directory)
+    source "$SCRIPT_DIR/venv/bin/activate"
     echo "Activated project-local virtual environment"
 elif [ -f "$HOME/llmtune/bin/activate" ]; then
     # Fallback to ~/llmtune venv (common on SLURM clusters)
@@ -54,11 +54,12 @@ fi
 # Install dependencies if needed
 # pip install -r requirements.txt
 
-# Download model
+# Download model (HF_TOKEN can be set as environment variable or in config.yaml)
 python download_model.py \
-    --model_name "${MODEL_NAME:-meta-llama/Llama-2-7b-hf}" \
-    --output_dir "${MODEL_OUTPUT_DIR:-./models}" \
-    --cache_dir "${HF_CACHE_DIR:-./cache}"
+    --model_name "${MODEL_NAME:-meta-llama/Llama-3.1-70B-Instruct}" \
+    --output_dir "${MODEL_OUTPUT_DIR:-/mnt/data/models}" \
+    --cache_dir "${HF_CACHE_DIR:-./cache}" \
+    --hf_token "${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN}}"
 
 echo "Model download completed!"
 

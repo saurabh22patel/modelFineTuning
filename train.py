@@ -30,6 +30,8 @@ from datetime import datetime
 import json
 import psutil
 import time
+from huggingface_hub import login
+from urllib.parse import urlparse
 
 def setup_distributed():
     """Initialize distributed training."""
@@ -84,11 +86,18 @@ def load_config(config_path):
     return config
 
 def prepare_dataset(dataset_path, tokenizer, max_length):
-    """Prepare dataset for training."""
+    """Prepare dataset for training. Loads pre-tokenized dataset if available."""
     print(f"Loading dataset from {dataset_path}...")
     dataset = load_from_disk(dataset_path)
     
-    # Determine text column
+    # Check if dataset is already pre-tokenized
+    # Pre-tokenized datasets should have 'input_ids' and 'labels' columns
+    if "input_ids" in dataset.column_names and "labels" in dataset.column_names:
+        print("Dataset is already pre-tokenized. Using pre-tokenized data.")
+        return dataset
+    
+    # If not pre-tokenized, tokenize on the fly (fallback)
+    print("Dataset is not pre-tokenized. Tokenizing on the fly...")
     text_column = "text" if "text" in dataset.column_names else dataset.column_names[0]
     
     def tokenize_function(examples):
@@ -163,58 +172,106 @@ def log_system_metrics(mlflow_client, run_id):
             print(f"Warning: Could not log system metrics: {e}")
 
 def evaluate_model_before_training(model, tokenizer, device, config):
-    """Evaluate model performance before fine-tuning."""
+    """Evaluate model performance before fine-tuning. Returns metrics for comparison."""
     if dist.get_rank() == 0:
-        print("Evaluating model before fine-tuning...")
+        print("Evaluating base model before fine-tuning...")
         
         # Simple evaluation: generate text
         model.eval()
-        test_prompt = "The future of artificial intelligence is"
+        test_prompts = [
+            "The future of artificial intelligence is",
+            "Once upon a time",
+            "The key to success is"
+        ]
+        
+        base_metrics = {}
+        all_generations = []
         
         with torch.no_grad():
-            inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=50,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9
-            )
-        
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            for i, test_prompt in enumerate(test_prompts):
+                inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=50,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9
+                )
+                
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                all_generations.append(f"Prompt {i+1}: {test_prompt}\nGeneration: {generated_text}\n")
+                
+                # Calculate metrics
+                base_metrics[f"base/prompt_{i+1}_length"] = len(generated_text)
+                base_metrics[f"base/prompt_{i+1}_tokens"] = len(outputs[0])
         
         # Log to MLflow
-        mlflow.log_text(generated_text, "evaluation/before_training_generation.txt")
-        mlflow.log_metric("evaluation/before_training_length", len(generated_text))
+        mlflow.log_text("\n".join(all_generations), "evaluation/base_model_generations.txt")
+        mlflow.log_metrics(base_metrics)
+        mlflow.log_metric("evaluation/base_model_avg_length", sum(base_metrics.values()) / len(base_metrics))
         
-        print(f"Before training generation: {generated_text}")
+        print(f"Base model evaluation complete. Logged {len(test_prompts)} generations to MLflow.")
         model.train()
+        
+        return base_metrics
+    return {}
 
-def evaluate_model_after_training(model, tokenizer, device, config):
-    """Evaluate model performance after fine-tuning."""
+def evaluate_model_after_training(model, tokenizer, device, config, base_metrics=None):
+    """Evaluate model performance after fine-tuning and compare with base model."""
     if dist.get_rank() == 0:
-        print("Evaluating model after fine-tuning...")
+        print("Evaluating fine-tuned model...")
         
         model.eval()
-        test_prompt = "The future of artificial intelligence is"
+        test_prompts = [
+            "The future of artificial intelligence is",
+            "Once upon a time",
+            "The key to success is"
+        ]
+        
+        fine_tuned_metrics = {}
+        all_generations = []
+        comparison_metrics = {}
         
         with torch.no_grad():
-            inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=50,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9
-            )
-        
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            for i, test_prompt in enumerate(test_prompts):
+                inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=50,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9
+                )
+                
+                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                all_generations.append(f"Prompt {i+1}: {test_prompt}\nGeneration: {generated_text}\n")
+                
+                # Calculate metrics
+                fine_tuned_metrics[f"fine_tuned/prompt_{i+1}_length"] = len(generated_text)
+                fine_tuned_metrics[f"fine_tuned/prompt_{i+1}_tokens"] = len(outputs[0])
+                
+                # Compare with base if available
+                if base_metrics:
+                    base_key = f"base/prompt_{i+1}_length"
+                    if base_key in base_metrics:
+                        diff = len(generated_text) - base_metrics[base_key]
+                        comparison_metrics[f"comparison/prompt_{i+1}_length_diff"] = diff
+                        comparison_metrics[f"comparison/prompt_{i+1}_length_pct_change"] = (diff / base_metrics[base_key]) * 100 if base_metrics[base_key] > 0 else 0
         
         # Log to MLflow
-        mlflow.log_text(generated_text, "evaluation/after_training_generation.txt")
-        mlflow.log_metric("evaluation/after_training_length", len(generated_text))
+        mlflow.log_text("\n".join(all_generations), "evaluation/fine_tuned_model_generations.txt")
+        mlflow.log_metrics(fine_tuned_metrics)
+        mlflow.log_metric("evaluation/fine_tuned_model_avg_length", sum(fine_tuned_metrics.values()) / len(fine_tuned_metrics))
         
-        print(f"After training generation: {generated_text}")
+        # Log comparison metrics
+        if comparison_metrics:
+            mlflow.log_metrics(comparison_metrics)
+            mlflow.log_metric("evaluation/comparison_avg_length_diff", 
+                            sum([v for k, v in comparison_metrics.items() if "length_diff" in k]) / len([k for k in comparison_metrics.keys() if "length_diff" in k]))
+        
+        print(f"Fine-tuned model evaluation complete. Logged {len(test_prompts)} generations to MLflow.")
+        if comparison_metrics:
+            print("Comparison metrics logged to MLflow for base vs fine-tuned model.")
         model.train()
 
 class CustomTrainer(Trainer):
@@ -265,51 +322,123 @@ def main():
     # Generate run name (needed for all ranks)
     run_name = f"fine_tuning_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # Initialize MLflow
+    # Initialize MLflow with remote tracking support
     if rank == 0:
-        mlflow.set_tracking_uri(config["mlflow"]["tracking_uri"])
+        # Get MLflow tracking URI from config or environment
+        tracking_uri = config["mlflow"].get("tracking_uri") or os.environ.get("MLFLOW_TRACKING_URI")
+        if not tracking_uri:
+            tracking_uri = "file:./mlruns"  # Default to local
+        
+        # Handle authentication for remote MLflow
+        username = config["mlflow"].get("username") or os.environ.get("MLFLOW_USERNAME")
+        password = config["mlflow"].get("password") or os.environ.get("MLFLOW_PASSWORD")
+        
+        # If username/password provided, construct URI with credentials
+        if username and password and not tracking_uri.startswith("file:"):
+            parsed = urlparse(tracking_uri)
+            # Reconstruct URI with credentials
+            if "@" not in tracking_uri:  # Only add if not already present
+                tracking_uri = f"{parsed.scheme}://{username}:{password}@{parsed.netloc}{parsed.path}"
+        
+        mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(config["mlflow"]["experiment_name"])
         mlflow.start_run(run_name=run_name)
         
-        # Log configuration
-        mlflow.log_params({
-            "model_name": config["model"]["name"],
-            "dataset_name": config["dataset"]["name"],
-            "num_epochs": config["training"]["num_epochs"],
-            "learning_rate": config["training"]["learning_rate"],
-            "batch_size_per_device": config["dataset"]["batch_size_per_device"],
-            "gradient_accumulation_steps": config["dataset"]["gradient_accumulation_steps"],
-            "world_size": world_size,
-            "num_gpus": world_size
-        })
+        # Log ALL configuration parameters comprehensively
+        all_params = {
+            # Model parameters
+            "model/name": config["model"]["name"],
+            "model/path": config["model"]["path"],
+            "model/use_flash_attention": config["model"]["use_flash_attention"],
+            "model/gradient_checkpointing": config["model"]["gradient_checkpointing"],
+            
+            # Dataset parameters
+            "dataset/name": config["dataset"]["name"],
+            "dataset/path": config["dataset"]["path"],
+            "dataset/max_length": config["dataset"]["max_length"],
+            "dataset/batch_size_per_device": config["dataset"]["batch_size_per_device"],
+            "dataset/gradient_accumulation_steps": config["dataset"]["gradient_accumulation_steps"],
+            
+            # Training parameters
+            "training/num_epochs": config["training"]["num_epochs"],
+            "training/learning_rate": config["training"]["learning_rate"],
+            "training/warmup_steps": config["training"]["warmup_steps"],
+            "training/weight_decay": config["training"]["weight_decay"],
+            "training/max_grad_norm": config["training"]["max_grad_norm"],
+            "training/lr_scheduler_type": config["training"]["lr_scheduler_type"],
+            "training/save_steps": config["training"]["save_steps"],
+            "training/eval_steps": config["training"]["eval_steps"],
+            "training/logging_steps": config["training"]["logging_steps"],
+            "training/output_dir": config["training"]["output_dir"],
+            "training/save_total_limit": config["training"]["save_total_limit"],
+            
+            # FSDP parameters
+            "fsdp/sharding_strategy": config["fsdp"]["sharding_strategy"],
+            "fsdp/cpu_offload": config["fsdp"]["cpu_offload"],
+            "fsdp/mixed_precision": config["fsdp"]["mixed_precision"],
+            "fsdp/use_orig_params": config["fsdp"]["use_orig_params"],
+            "fsdp/limit_all_gathers": config["fsdp"]["limit_all_gathers"],
+            
+            # Performance parameters
+            "performance/dataloader_num_workers": config["performance"]["dataloader_num_workers"],
+            "performance/pin_memory": config["performance"]["pin_memory"],
+            "performance/prefetch_factor": config["performance"]["prefetch_factor"],
+            "performance/use_cpu_offload": config["performance"]["use_cpu_offload"],
+            "performance/activation_checkpointing": config["performance"]["activation_checkpointing"],
+            
+            # System parameters
+            "system/world_size": world_size,
+            "system/num_gpus": world_size,
+            "system/effective_batch_size": config["dataset"]["batch_size_per_device"] * world_size * config["dataset"]["gradient_accumulation_steps"],
+        }
+        
+        mlflow.log_params(all_params)
         
         # Log config file
         mlflow.log_artifact(args.config, "config")
+        
+        print(f"MLflow tracking initialized at: {tracking_uri}")
+        print(f"Experiment: {config['mlflow']['experiment_name']}")
+        print(f"Run name: {run_name}")
+    
+    # Authenticate with HuggingFace if token provided (for gated models)
+    hf_token = config["model"].get("hf_token") or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if hf_token:
+        if rank == 0:
+            print("Authenticating with HuggingFace for gated model access...")
+        login(token=hf_token)
     
     # Load tokenizer
     if rank == 0:
         print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(config["model"]["path"])
+    tokenizer = AutoTokenizer.from_pretrained(
+        config["model"]["path"],
+        token=hf_token if not os.path.exists(config["model"]["path"]) else None
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
     # Load model
     if rank == 0:
         print("Loading model...")
+        print(f"Model path: {config['model']['path']}")
+        print("FSDP will handle model sharding across GPUs for optimal utilization")
     
-    # For FSDP, don't use device_map
+    # For FSDP, don't use device_map - FSDP will handle distribution
+    # FSDP ensures optimal GPU utilization by sharding model parameters across all GPUs
     model = AutoModelForCausalLM.from_pretrained(
         config["model"]["path"],
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        low_cpu_mem_usage=True
+        low_cpu_mem_usage=True,
+        token=hf_token if not os.path.exists(config["model"]["path"]) else None
     )
     
     # Enable gradient checkpointing for memory efficiency
     if config["model"]["gradient_checkpointing"]:
         model.gradient_checkpointing_enable()
     
-    # Move model to device (FSDP will handle distribution)
+    # Move model to device (FSDP will handle distribution across all GPUs)
     model = model.to(device)
     
     # Prepare dataset
@@ -335,10 +464,15 @@ def main():
         mlm=False
     )
     
-    # Training arguments
+    # Training arguments with FSDP configuration for optimal GPU utilization
+    # FSDP ensures optimal GPU utilization by sharding model parameters across GPUs
     fsdp_strategy = None
     fsdp_config = None
+    
+    # Configure FSDP based on config for optimal parallelization
     if config["fsdp"]["sharding_strategy"] == "FULL_SHARD":
+        # Use full sharding with auto_wrap for optimal memory distribution across GPUs
+        # This ensures each GPU only holds a portion of the model, maximizing utilization
         fsdp_strategy = "full_shard auto_wrap"
         fsdp_config = {
             "sharding_strategy": "full_shard",
@@ -346,6 +480,14 @@ def main():
             "mixed_precision": "bf16" if config["fsdp"]["mixed_precision"] else None,
             "use_orig_params": config["fsdp"]["use_orig_params"],
             "limit_all_gathers": config["fsdp"]["limit_all_gathers"],
+        }
+    elif config["fsdp"]["sharding_strategy"] == "SHARD_GRAD_OP":
+        fsdp_strategy = "shard_grad_op auto_wrap"
+        fsdp_config = {
+            "sharding_strategy": "shard_grad_op",
+            "cpu_offload": config["fsdp"]["cpu_offload"],
+            "mixed_precision": "bf16" if config["fsdp"]["mixed_precision"] else None,
+            "use_orig_params": config["fsdp"]["use_orig_params"],
         }
     
     training_args = TrainingArguments(
@@ -372,9 +514,10 @@ def main():
         run_name=run_name if rank == 0 else None,
     )
     
-    # Evaluate before training
+    # Evaluate before training (base model evaluation)
+    base_metrics = {}
     if rank == 0:
-        evaluate_model_before_training(model, tokenizer, device, config)
+        base_metrics = evaluate_model_before_training(model, tokenizer, device, config)
     
     # Create trainer
     trainer = CustomTrainer(
@@ -408,8 +551,8 @@ def main():
                 registered_model_name=f"{config['model']['name'].replace('/', '_')}_fine_tuned"
             )
         
-        # Evaluate after training
-        evaluate_model_after_training(model, tokenizer, device, config)
+        # Evaluate after training and compare with base model
+        evaluate_model_after_training(model, tokenizer, device, config, base_metrics)
         
         # Log final GPU utilization stats
         if trainer.gpu_utilizations:

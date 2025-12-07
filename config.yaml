@@ -8,14 +8,15 @@ environment:
 
 # Training Configuration
 model:
-  name: "meta-llama/Llama-2-7b-hf"  # Change to your model
-  path: "./models"  # Local path after download
+  name: "meta-llama/Llama-3.1-70B-Instruct"  # Change to your model
+  path: "/mnt/data/models"  # Local path after download
   use_flash_attention: true
   gradient_checkpointing: true
+  hf_token: null  # Set via HF_TOKEN environment variable or here (not recommended for security)
 
 dataset:
   name: "wikitext"  # Change to your dataset
-  path: "./datasets/dataset"  # Local path after download
+  path: "/root/data/dataset"  # Local path after download (pre-tokenized)
   max_length: 2048
   batch_size_per_device: 4  # Adjust based on GPU memory
   gradient_accumulation_steps: 8  # Effective batch size = batch_size_per_device * num_gpus * gradient_accumulation_steps
@@ -30,7 +31,7 @@ training:
   save_steps: 500
   eval_steps: 500
   logging_steps: 10
-  output_dir: "./checkpoints"
+  output_dir: "/mnt/data/models/checkpoints"
   save_total_limit: 3
 
 # FSDP Configuration for distributed training
@@ -43,10 +44,13 @@ fsdp:
 
 # MLflow Configuration
 mlflow:
-  tracking_uri: "file:./mlruns"  # Change to remote URI if needed
+  tracking_uri: null  # Set via MLFLOW_TRACKING_URI environment variable or here (e.g., "http://your-mlflow-server:5000")
+  username: null  # Set via MLFLOW_USERNAME environment variable or here
+  password: null  # Set via MLFLOW_PASSWORD environment variable or here (not recommended for security)
   experiment_name: "llm_fine_tuning"
   log_model: true
   log_artifacts: true
+  # For remote MLflow, use format: "http://username:password@mlflow-server:5000" or set username/password separately
 
 # Performance optimization
 performance:
