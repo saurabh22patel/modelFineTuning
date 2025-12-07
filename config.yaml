@@ -15,8 +15,8 @@ model:
   hf_token: null  # Set via HF_TOKEN environment variable or here (not recommended for security)
 
 dataset:
-  name: "wikitext"  # Change to your dataset
-  path: "/root/data/dataset"  # Local path after download (pre-tokenized)
+  name: "teknium/OpenHermes-2.5"  # Change to your dataset
+  path: "/home/data/dataset"  # Local path after download (pre-tokenized)
   max_length: 2048
   batch_size_per_device: 4  # Adjust based on GPU memory
   gradient_accumulation_steps: 8  # Effective batch size = batch_size_per_device * num_gpus * gradient_accumulation_steps

@@ -1,33 +1,17 @@
 #!/usr/bin/env python3
-"""
-Script to download and prepare a model for fine-tuning.
-Supports HuggingFace models and saves them in a format ready for distributed training.
-"""
 
 import argparse
 import os
-from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 from huggingface_hub import login
 
 def download_model(model_name: str, output_dir: str, cache_dir: str = None, hf_token: str = None):
-    """
-    Download a model from HuggingFace and save it locally.
-    
-    Args:
-        model_name: HuggingFace model identifier (e.g., 'meta-llama/Llama-2-7b-hf')
-        output_dir: Directory to save the model
-        cache_dir: Optional cache directory for HuggingFace cache
-        hf_token: HuggingFace token for gated models (can also use HF_TOKEN env var)
-    """
     print(f"Downloading model: {model_name}")
     print(f"Output directory: {output_dir}")
     
-    # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
-    # Authenticate with HuggingFace if token provided
     token = hf_token or os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         print("Authenticating with HuggingFace...")
@@ -35,13 +19,11 @@ def download_model(model_name: str, output_dir: str, cache_dir: str = None, hf_t
     else:
         print("Warning: No HuggingFace token provided. If model is gated, download will fail.")
     
-    # Set cache directory if provided
     if cache_dir:
         os.environ['HF_HOME'] = cache_dir
         os.environ['TRANSFORMERS_CACHE'] = cache_dir
     
     try:
-        # Download tokenizer
         print("Downloading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(
             model_name,
@@ -50,7 +32,6 @@ def download_model(model_name: str, output_dir: str, cache_dir: str = None, hf_t
             token=token
         )
         
-        # Download model
         print("Downloading model (this may take a while)...")
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -61,7 +42,6 @@ def download_model(model_name: str, output_dir: str, cache_dir: str = None, hf_t
             token=token
         )
         
-        # Save model and tokenizer
         print(f"Saving model to {output_dir}...")
         model.save_pretrained(output_dir)
         tokenizer.save_pretrained(output_dir)

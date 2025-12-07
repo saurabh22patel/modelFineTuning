@@ -53,10 +53,10 @@ def check_config(config_path):
             print(f"✓ Model path exists: {model_path}")
         
         # Check dataset path
-        dataset_path = config['dataset'].get('path', './datasets/dataset')
+        dataset_path = config['dataset'].get('path', '/home/data/dataset')
         if not os.path.exists(dataset_path):
             print(f"⚠ Dataset path does not exist: {dataset_path}")
-            print("  Run: python download_dataset.py --dataset_name <dataset> --output_dir ./datasets")
+            print("  Run: python download_dataset.py --dataset_name <dataset> --output_dir /home/data")
         else:
             print(f"✓ Dataset path exists: {dataset_path}")
         
