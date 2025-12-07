@@ -43,8 +43,21 @@ def download_dataset(dataset_name: str, output_dir: str, tokenizer_path: str = N
         if os.path.exists(dataset_name):
             # Local file/directory
             if dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
-                with open(dataset_name, 'r') as f:
-                    data = [json.loads(line) if dataset_name.endswith('.jsonl') else json.load(f)]
+                if dataset_name.endswith('.jsonl'):
+                    # JSONL: Read all lines, each line is a JSON object
+                    data = []
+                    with open(dataset_name, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:  # Skip empty lines
+                                data.append(json.loads(line))
+                else:
+                    # JSON: Load the entire file
+                    with open(dataset_name, 'r') as f:
+                        data = json.load(f)
+                    # If it's a single object, wrap it in a list
+                    if not isinstance(data, list):
+                        data = [data]
                 dataset = Dataset.from_list(data)
             else:
                 dataset = load_dataset(dataset_name, split=split)
