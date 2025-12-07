@@ -1,6 +1,6 @@
 # LLM Fine-Tuning on Slurm Cluster
 
-This repository contains scripts and code for fine-tuning Large Language Models (LLMs) on a Nebius soperator cluster with 2 worker nodes, each with 8 H100 GPUs (16 GPUs total).
+This repository contains scripts and code for fine-tuning Large Language Models (LLMs) on a Slurm cluster with 2 worker nodes, each with 8 H100 GPUs (16 GPUs total).
 
 ## Features
 
