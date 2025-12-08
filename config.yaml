@@ -1,25 +1,18 @@
-# Environment Configuration
-environment:
-  venv_path: "~/llmtune/bin/activate"  # Path to virtual environment activation script
-  # Options:
-  #   - "~/llmtune/bin/activate" for shared cluster venv
-  #   - "./venv/bin/activate" for project-local venv
-  #   - Leave empty or null to use automatic detection
-
-# Training Configuration
-model:
-  name: "meta-llama/Llama-3.1-70B-Instruct"  # Change to your model
-  path: "/mnt/data/models"  # Local path after download
-  use_flash_attention: true
-  gradient_checkpointing: true
-  hf_token: null  # Set via HF_TOKEN environment variable or here (not recommended for security)
-
+# Dataset Configuration
 dataset:
-  name: "teknium/OpenHermes-2.5"  # Change to your dataset
-  path: "/home/data/dataset"  # Local path after download (pre-tokenized)
-  max_length: 2048
-  batch_size_per_device: 4  # Adjust based on GPU memory
-  gradient_accumulation_steps: 8  # Effective batch size = batch_size_per_device * num_gpus * gradient_accumulation_steps
+  name: "teknium/OpenHermes-2.5"  # Dataset name for logging
+  batch_size_per_device: 24  # Significantly increased to utilize available GPU memory (was 8, now 24)
+  gradient_accumulation_steps: 4  # Reduced since batch_size increased significantly
+  max_length: 2048  # Doubled to increase compute per batch and better utilize GPU (was 1024, now 2048)
+  path: "/home/data/datasets/1024/dataset"  # UPDATE THIS to your actual dataset path
+
+# Model Configuration
+model:
+  name: "meta-llama/Llama-3.2-1B-Instruct"  # Model name for logging
+  path: "/mnt/data/models/1b"  # UPDATE THIS to your actual model path or HF repo ID
+  use_flash_attention: true  # ENABLED - reduces memory and allows larger batches
+  gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
+  hf_token: null  # HuggingFace token for gated models (or set via HF_TOKEN env var)
 
 training:
   num_epochs: 3
@@ -33,14 +26,19 @@ training:
   logging_steps: 10
   output_dir: "/mnt/data/models/checkpoints"
   save_total_limit: 3
-
+  evaluate_before_training: false  # Set to true only if you have enough memory (can cause OOM)
+  skip_fsdp_verification: true
 # FSDP Configuration for distributed training
 fsdp:
-  sharding_strategy: "FULL_SHARD"  # Options: FULL_SHARD, SHARD_GRAD_OP, NO_SHARD
-  cpu_offload: false
-  mixed_precision: true
-  use_orig_params: true
-  limit_all_gathers: true
+  sharding_strategy: "FULL_SHARD"  # Shard model across all GPUs for optimal NVLink utilization
+  cpu_offload: false  # DISABLED - keep model on GPU to enable NVLink communication
+  mixed_precision: true  # Use bfloat16 for memory efficiency
+  use_orig_params: true  # Required for FSDP with transformers
+  limit_all_gathers: true  # ENABLED - reduces memory spikes and improves stability
+  state_dict_type: "SHARDED_STATE_DICT"  # Use sharded state dict to save memory during checkpointing
+  backward_prefetch: "BACKWARD_PRE"  # Prefetch parameters before backward pass
+  # forward_prefetch: NOT SUPPORTED - causes parsing errors in transformers/accelerate FSDP config
+  param_init_fn: null  # Use default parameter initialization
 
 # MLflow Configuration
 mlflow:
@@ -54,9 +52,17 @@ mlflow:
 
 # Performance optimization
 performance:
-  dataloader_num_workers: 4
-  pin_memory: true
-  prefetch_factor: 2
-  use_cpu_offload: false
-  activation_checkpointing: true
-
+  dataloader_num_workers: 12  # Increased for better data loading throughput
+  pin_memory: true  # ENABLED - faster CPU to GPU transfers
+  prefetch_factor: 10  # Increased for better GPU utilization
+  persistent_workers: true  # ENABLED - avoid worker restart overhead
+  use_cpu_offload: false  # DISABLED - keep optimizer states on GPU for NVLink communication
+  activation_checkpointing: true  # Already enabled via model.gradient_checkpointing
+  dataloader_timeout: 60  # Timeout to prevent worker hangs
+  # Memory optimization options
+  use_8bit_optimizer: true  # Use 8-bit optimizers to reduce optimizer memory by ~50%
+  activation_offloading: false  # DISABLED - keep activations on GPU for NVLink communication
+  gradient_checkpointing_every_n_layers: 4  # Less aggressive checkpointing (was 2, now 4) - improves speed with available memory
+  max_memory_mb: 78000  # Increased to use more of available 80GB (leaves 2GB buffer)
+  clear_cache_frequency: 50  # Less frequent cache clearing (was 20, now 50) - reduces overhead
+  sync_module_states: false  # DISABLED by default - can cause deadlock during FSDP init if ranks don't sync properly

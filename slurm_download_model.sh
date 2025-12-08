@@ -7,7 +7,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --partition=gpu
+#SBATCH --partition=main
 
 mkdir -p logs
 
@@ -31,11 +31,15 @@ else
     echo "Error: No virtual environment found"
     exit 1
 fi
-python download_model.py \
+if python download_model.py \
     --model_name "${MODEL_NAME:-meta-llama/Llama-3.1-70B-Instruct}" \
     --output_dir "${MODEL_OUTPUT_DIR:-/mnt/data/models}" \
     --cache_dir "${HF_CACHE_DIR:-./cache}" \
-    --hf_token "${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN}}"
-
-echo "Model download completed!"
+    --hf_token "${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN}}"; then
+    echo "Model download completed successfully!"
+    exit 0
+else
+    echo "ERROR: Model download failed!"
+    exit 1
+fi
 

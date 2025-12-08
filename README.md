@@ -109,6 +109,94 @@ mlflow ui --backend-store-uri file:./mlruns
 
 Then open http://localhost:5000 in your browser.
 
+## Model Evaluation
+
+### Inference Evaluation Script
+
+The `inference_eval.py` script evaluates both the base and fine-tuned models, comparing their performance and logging comprehensive metrics to MLflow.
+
+#### Features
+
+- **Comprehensive Metrics**: Response length, generation speed, tokens per second, perplexity
+- **Side-by-Side Comparison**: Direct comparison between base and fine-tuned models
+- **MLflow Integration**: All metrics and generations logged to MLflow for tracking
+- **Flexible Prompts**: Uses predefined test prompts or can sample from your dataset
+
+#### Usage
+
+**Submit SLURM Job:**
+
+```bash
+sbatch slurm_inference_eval.sh
+```
+
+**Run Manually:**
+
+```bash
+python inference_eval.py \
+    --config config.yaml \
+    --base_model_path /mnt/data/models \
+    --fine_tuned_model_path /mnt/data/models/checkpoints/final_model \
+    --num_prompts 20 \
+    --max_new_tokens 256 \
+    --calculate_perplexity
+```
+
+**With Custom Options:**
+
+```bash
+python inference_eval.py \
+    --config config.yaml \
+    --num_prompts 50 \
+    --max_new_tokens 512 \
+    --calculate_perplexity \
+    --eval_dataset_path /home/data/dataset \
+    --run_name "my_evaluation_run"
+```
+
+#### Arguments
+
+- `--config`: Path to config file (default: config.yaml)
+- `--base_model_path`: Path to base model (overrides config)
+- `--fine_tuned_model_path`: Path to fine-tuned model checkpoint
+- `--num_prompts`: Number of test prompts (default: 20)
+- `--max_new_tokens`: Maximum tokens to generate per prompt (default: 256)
+- `--calculate_perplexity`: Calculate perplexity on evaluation dataset
+- `--eval_dataset_path`: Path to evaluation dataset for perplexity
+- `--run_name`: MLflow run name (default: auto-generated)
+
+#### Metrics Captured
+
+**Per-Model Metrics:**
+- Average/median/min/max response length
+- Average tokens generated
+- Average generation time
+- Tokens per second (min/avg/max)
+- Perplexity (if calculated)
+
+**Comparison Metrics:**
+- Response length difference and percentage change
+- Generation speed difference and percentage change
+- Perplexity difference and improvement
+
+**Outputs:**
+- All generations saved as text artifacts in MLflow
+- Test prompts logged for reproducibility
+- Comprehensive metrics logged for tracking
+
+#### Viewing Results
+
+After running the evaluation, view results in MLflow:
+
+```bash
+mlflow ui --backend-store-uri file:./mlruns
+```
+
+Navigate to the experiment and run to see:
+- Metrics comparison charts
+- Generated text samples
+- Performance improvements
+
 ## Configuration
 
 ### Key Configuration Parameters

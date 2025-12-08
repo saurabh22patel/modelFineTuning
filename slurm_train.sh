@@ -8,67 +8,40 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:8
 #SBATCH --mem=0
-#SBATCH --partition=gpu
+#SBATCH --partition=main
 #SBATCH --exclusive
 
+set -e
+
+# Configuration
+PROJECT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+VENV_PATH="/root/llmtune/venv/bin/activate"
+CONFIG_FILE="config.yaml"
+MASTER_PORT=29500
+
+# Setup
 mkdir -p logs
+cd "$PROJECT_DIR"
+source "$VENV_PATH"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/load_config.sh" ]; then
-    source "$SCRIPT_DIR/load_config.sh" "${CONFIG_PATH:-$SCRIPT_DIR/config.yaml}"
-fi
-
-if [ -n "$VENV_PATH" ]; then
-    if [ -f "$VENV_PATH" ]; then
-        source "$VENV_PATH"
-    else
-        echo "Error: VENV_PATH specified but not found: $VENV_PATH"
-        exit 1
-    fi
-elif [ -f "$SCRIPT_DIR/venv/bin/activate" ]; then
-    source "$SCRIPT_DIR/venv/bin/activate"
-elif [ -f "$HOME/llmtune/bin/activate" ]; then
-    source "$HOME/llmtune/bin/activate"
-else
-    echo "Error: No virtual environment found"
-    exit 1
-fi
-
-export MASTER_PORT=29500
-export NCCL_DEBUG=INFO
-export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=eth0
-export CUDA_DEVICE_ORDER=PCI_BUS_ID
-export NCCL_P2P_DISABLE=0
-export NCCL_SHM_DISABLE=0
-export NCCL_TREE_THRESHOLD=0
+# Distributed training setup
 export TORCH_DISTRIBUTED_BACKEND=nccl
-export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1
-NODELIST=$(scontrol show hostnames $SLURM_JOB_NODELIST)
-NODES=($NODELIST)
-MASTER_NODE=${NODES[0]}
-MASTER_ADDR=$(scontrol show hostnames ${SLURM_JOB_NODELIST} | head -n 1)
+export PYTHONUNBUFFERED=1
+
+# Get master node IP
+MASTER_NODE=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+MASTER_ADDR=$(getent hosts $MASTER_NODE 2>/dev/null | awk '{print $1}' | head -n 1)
+[ -z "$MASTER_ADDR" ] && MASTER_ADDR=$MASTER_NODE
 
 export MASTER_ADDR=$MASTER_ADDR
-export WORLD_SIZE=$SLURM_NTASKS
-export RANK=$SLURM_PROCID
-export LOCAL_RANK=$SLURM_LOCALID
+export MASTER_PORT=$MASTER_PORT
 
-echo "========================================="
-echo "Job ID: $SLURM_JOB_ID"
-echo "Job Name: $SLURM_JOB_NAME"
-echo "Node: $SLURM_NODEID"
-echo "Master Node: $MASTER_NODE"
-echo "Master Addr: $MASTER_ADDR"
-echo "World Size: $WORLD_SIZE"
-echo "Rank: $RANK"
-echo "Local Rank: $LOCAL_RANK"
-echo "========================================="
+# Resolve config path
+[ "${CONFIG_FILE#/}" = "$CONFIG_FILE" ] && CONFIG_FILE="$PROJECT_DIR/$CONFIG_FILE"
 
-export CUDA_VISIBLE_DEVICES=$SLURM_LOCALID
-srun python train.py \
-    --config "${CONFIG_PATH:-$SCRIPT_DIR/config.yaml}" \
-    --local_rank $SLURM_LOCALID
+# Verify files
+[ ! -f "$PROJECT_DIR/train.py" ] && echo "ERROR: train.py not found" && exit 1
+[ ! -f "$CONFIG_FILE" ] && echo "ERROR: Config file not found: $CONFIG_FILE" && exit 1
 
-echo "Training completed!"
-
+# Launch training
+srun --ntasks=$SLURM_NTASKS python -u "$PROJECT_DIR/train.py" --config "$CONFIG_FILE"
