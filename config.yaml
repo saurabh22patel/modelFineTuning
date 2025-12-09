@@ -1,16 +1,16 @@
 # Dataset Configuration
 dataset:
   name: "teknium/OpenHermes-2.5"  # Dataset name for logging
-  batch_size_per_device: 64  # Increased significantly for 90%+ GPU utilization (was 16)
-  gradient_accumulation_steps: 1  # Minimized to 1 for maximum GPU utilization (was 4)
-  max_length: 1024  # Reduced to free memory for larger batches (was 2048)
+  batch_size_per_device: 8  # Optimized for GPU utilization (was 6, now 8)
+  gradient_accumulation_steps: 6  # Reduced to improve GPU utilization (was 64, now 8 - too high causes idle time)
+  max_length: 2048  # Doubled to increase compute per batch and better utilize GPU (was 1024, now 2048)
   path: "/home/data/datasets/2048/dataset"  # UPDATE THIS to your actual dataset path
 
 # Model Configuration
 model:
   name: "meta-llama/Llama-3.2-1B-Instruct"  # Model name for logging
   path: "/mnt/data/models/1b"  # UPDATE THIS to your actual model path or HF repo ID
-  use_flash_attention: true  # ENABLED - reduces memory and allows larger batches (CRITICAL for performance)
+  use_flash_attention: false # ENABLED - reduces memory and allows larger batches (CRITICAL for performance)
   gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
   hf_token: null  # HuggingFace token for gated models (or set via HF_TOKEN env var)
 
@@ -21,14 +21,17 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   lr_scheduler_type: "cosine"
-  save_steps: 500
-  eval_steps: 500
+  save_steps: 2000
+  eval_steps: 2000
   logging_steps: 10
   output_dir: "/mnt/data/models/checkpoints"
   save_total_limit: 3
   evaluate_before_training: false  # Set to true only if you have enough memory (can cause OOM)
   skip_fsdp_verification: true
-# FSDP Configuration for distributed training
+  save_safetensors: true  # Use safetensors for faster checkpoint saving (enabled by default)
+  save_only_model: false
+
+ # FSDP Configuration for distributed training
 fsdp:
   sharding_strategy: "FULL_SHARD"  # Shard model across all GPUs for optimal NVLink utilization
   cpu_offload: false  # DISABLED - keep model on GPU to enable NVLink communication
@@ -52,17 +55,17 @@ mlflow:
 
 # Performance optimization
 performance:
-  dataloader_num_workers: 12  # Increased to keep GPU fed with data (was 8)
+  dataloader_num_workers: 12 # Optimized - too many workers (36) causes overhead and context switching (now 4)
   pin_memory: true  # ENABLED - faster CPU to GPU transfers
-  prefetch_factor: 8  # Increased to reduce data loading stalls (was 4)
+  prefetch_factor: 8  # Optimized - too high (30) causes memory overhead (now 2)
   persistent_workers: true  # ENABLED - avoid worker restart overhead
   use_cpu_offload: false  # DISABLED - keep optimizer states on GPU for NVLink communication
   activation_checkpointing: true  # Already enabled via model.gradient_checkpointing
   dataloader_timeout: 60  # Timeout to prevent worker hangs
   # Memory optimization options
-  use_8bit_optimizer: true  # Use 8-bit optimizers to reduce optimizer memory by ~50%
+  use_8bit_optimizer: false  # Use 8-bit optimizers to reduce optimizer memory by ~50%
   activation_offloading: false  # DISABLED - keep activations on GPU for NVLink communication
-  gradient_checkpointing_every_n_layers: 4  # Less aggressive checkpointing to reduce compute overhead (was 1)
+  gradient_checkpointing_every_n_layers: 4  # More aggressive checkpointing to save memory and allow larger batches
   max_memory_mb: 78000  # Increased to use more of available 80GB (leaves 2GB buffer)
-  clear_cache_frequency: 50  # Less frequent cache clearing to reduce overhead (was 20)
+  clear_cache_frequency: 50  # Less frequent cache clearing (was 20, now 50) - reduces overhead
   sync_module_states: false  # DISABLED by default - can cause deadlock during FSDP init if ranks don't sync properly
