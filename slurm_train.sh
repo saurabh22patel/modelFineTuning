@@ -19,6 +19,12 @@ VENV_PATH="/root/llmtune/venv/bin/activate"
 CONFIG_FILE="config.yaml"
 MASTER_PORT=29500
 
+# Optional: Resume from checkpoint
+# Usage: sbatch slurm_train.sh [checkpoint_path|latest]
+# Example: sbatch slurm_train.sh latest
+# Example: sbatch slurm_train.sh /path/to/checkpoint-1000
+RESUME_CHECKPOINT="${1:-}"
+
 # Setup
 mkdir -p logs
 cd "$PROJECT_DIR"
@@ -43,5 +49,12 @@ export MASTER_PORT=$MASTER_PORT
 [ ! -f "$PROJECT_DIR/train.py" ] && echo "ERROR: train.py not found" && exit 1
 [ ! -f "$CONFIG_FILE" ] && echo "ERROR: Config file not found: $CONFIG_FILE" && exit 1
 
+# Build training command
+TRAIN_CMD="python -u $PROJECT_DIR/train.py --config $CONFIG_FILE"
+if [ -n "$RESUME_CHECKPOINT" ]; then
+    TRAIN_CMD="$TRAIN_CMD --resume_from_checkpoint $RESUME_CHECKPOINT"
+    echo "Resuming from checkpoint: $RESUME_CHECKPOINT"
+fi
+
 # Launch training
-srun --ntasks=$SLURM_NTASKS python -u "$PROJECT_DIR/train.py" --config "$CONFIG_FILE"
+srun --ntasks=$SLURM_NTASKS $TRAIN_CMD

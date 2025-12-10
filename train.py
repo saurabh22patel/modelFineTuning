@@ -643,6 +643,32 @@ class CustomTrainer(Trainer):
         
         return metrics
 
+def find_latest_checkpoint(output_dir):
+    """Find the latest checkpoint directory in the output directory."""
+    if not os.path.exists(output_dir):
+        return None
+    
+    checkpoints = []
+    for item in os.listdir(output_dir):
+        checkpoint_path = os.path.join(output_dir, item)
+        if os.path.isdir(checkpoint_path) and item.startswith("checkpoint-"):
+            try:
+                step_num = int(item.split("-")[1])
+                # Check if it's a valid checkpoint (has training_state.bin or trainer_state.json)
+                state_file = os.path.join(checkpoint_path, "trainer_state.json")
+                if os.path.exists(state_file):
+                    checkpoints.append((step_num, checkpoint_path))
+            except (ValueError, IndexError):
+                continue
+    
+    if not checkpoints:
+        return None
+    
+    # Sort by step number and return the latest
+    checkpoints.sort(key=lambda x: x[0], reverse=True)
+    return checkpoints[0][1]
+
+
 def main():
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
@@ -652,6 +678,8 @@ def main():
     parser = argparse.ArgumentParser(description="Distributed fine-tuning with FSDP")
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config file")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, 
+                       help="Path to checkpoint directory to resume from, or 'latest' to resume from latest checkpoint")
     args = parser.parse_args()
     
     rank = 0
@@ -1083,8 +1111,26 @@ def main():
                     print_flush(f"⚠️  WARNING: Barrier failed: {e}", rank=0)
                     print_flush("⚠️  Proceeding with available ranks", rank=0)
         
+        # Determine checkpoint to resume from
+        resume_from_checkpoint = None
+        if args.resume_from_checkpoint:
+            if args.resume_from_checkpoint.lower() == "latest":
+                resume_from_checkpoint = find_latest_checkpoint(config["training"]["output_dir"])
+                if resume_from_checkpoint:
+                    print_flush(f"Resuming from latest checkpoint: {resume_from_checkpoint}", rank=0)
+                else:
+                    print_flush("No checkpoint found, starting training from scratch", rank=0)
+            else:
+                resume_from_checkpoint = args.resume_from_checkpoint
+                if os.path.exists(resume_from_checkpoint):
+                    print_flush(f"Resuming from checkpoint: {resume_from_checkpoint}", rank=0)
+                else:
+                    print_flush(f"WARNING: Checkpoint path does not exist: {resume_from_checkpoint}", rank=0)
+                    print_flush("Starting training from scratch", rank=0)
+                    resume_from_checkpoint = None
+        
         print_flush("Starting training loop...", rank=0)
-        trainer.train()
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         print_flush("Training completed successfully", rank=rank)
         training_successful = True
         
