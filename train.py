@@ -24,6 +24,8 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     ShardingStrategy,
     BackwardPrefetch,
+    FullStateDictConfig,
+    StateDictType,
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from functools import partial
@@ -1139,16 +1141,58 @@ def main():
             return
         
         # Save final model
+        # Note: For FSDP with large models, gathering full state dict can timeout.
+        # Instead, we'll use the latest checkpoint and provide instructions for consolidation.
         if rank == 0 and training_successful:
             try:
+                print("=" * 60, flush=True)
                 print("Saving final model...", flush=True)
+                print("=" * 60, flush=True)
                 final_model_path = os.path.join(config["training"]["output_dir"], "final_model")
-                trainer.save_model(final_model_path)
-                tokenizer.save_pretrained(final_model_path)
-                print("Final model saved successfully", flush=True)
+                
+                # For FSDP models, skip final model save to avoid NCCL timeout
+                # Instead, use the latest checkpoint and consolidate separately
+                if isinstance(model, FSDP):
+                    print("Skipping final model save for FSDP (to avoid NCCL timeout).", flush=True)
+                    print("Checkpoints are already saved during training.", flush=True)
+                    
+                    # Find latest checkpoint
+                    latest_checkpoint = find_latest_checkpoint(config["training"]["output_dir"])
+                    if latest_checkpoint:
+                        print(f"Latest checkpoint: {latest_checkpoint}", flush=True)
+                        print("=" * 60, flush=True)
+                        print("To create final_model, run this command after training completes:", flush=True)
+                        print(f"  python consolidate_checkpoint.py {latest_checkpoint} {final_model_path}", flush=True)
+                        print("=" * 60, flush=True)
+                        
+                        # Create a symlink or copy the latest checkpoint as final_model for convenience
+                        # But first, just save the tokenizer to final_model path
+                        os.makedirs(final_model_path, exist_ok=True)
+                        print("Saving tokenizer to final_model directory...", flush=True)
+                        tokenizer.save_pretrained(final_model_path)
+                        print("Tokenizer saved. Model weights are in the latest checkpoint.", flush=True)
+                    else:
+                        print("WARNING: No checkpoints found!", flush=True)
+                        # Still try to save tokenizer
+                        os.makedirs(final_model_path, exist_ok=True)
+                        tokenizer.save_pretrained(final_model_path)
+                else:
+                    # Non-FSDP model, use standard save
+                    print("Saving non-FSDP model...", flush=True)
+                    trainer.save_model(final_model_path)
+                    saved_files = os.listdir(final_model_path)
+                    print(f"Files saved: {saved_files}", flush=True)
+                    
+                    # Save tokenizer
+                    print("Saving tokenizer...", flush=True)
+                    tokenizer.save_pretrained(final_model_path)
+                    print("Final model saved successfully", flush=True)
+                
             except Exception as e:
                 print(f"ERROR saving final model: {e}", flush=True)
                 traceback.print_exc()
+                # Don't fail the entire training run if final save fails
+                print("Training completed, but final model save failed. Check latest checkpoint.", flush=True)
             
             try:
                 if config["mlflow"]["log_model"]:

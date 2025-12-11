@@ -1,10 +1,10 @@
 # Dataset Configuration
 dataset:
   name: "teknium/OpenHermes-2.5"  # Dataset name for logging
-  batch_size_per_device: 8  # Optimized for GPU utilization (was 6, now 8)
-  gradient_accumulation_steps: 6  # Reduced to improve GPU utilization (was 64, now 8 - too high causes idle time)
+  batch_size_per_device: 10  # Optimized for GPU utilization (was 6, now 8)
+  gradient_accumulation_steps: 3  # Reduced to improve GPU utilization (was 64, now 8 - too high causes idle time)
   max_length: 2048  # Doubled to increase compute per batch and better utilize GPU (was 1024, now 2048)
-  path: "/home/data/datasets/2048/dataset"  # UPDATE THIS to your actual dataset path
+  path: "/home/data/datasets/2048/20M"  # UPDATE THIS to your actual dataset path
 
 # Model Configuration
 model:
@@ -12,7 +12,7 @@ model:
   path: "/mnt/data/models/1b"  # UPDATE THIS to your actual model path or HF repo ID
   use_flash_attention: false # ENABLED - reduces memory and allows larger batches (CRITICAL for performance)
   gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
-  hf_token: null  # HuggingFace token for gated models (or set via HF_TOKEN env var)
+  hf_token: "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"  # HuggingFace token for gated models (or set via HF_TOKEN env var)
 
 training:
   num_epochs: 3
@@ -21,16 +21,16 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   lr_scheduler_type: "cosine"
-  save_steps: 2000
-  eval_steps: 2000
+  save_steps: 200
+  eval_steps: 200
   logging_steps: 10
-  output_dir: "/mnt/data/models/checkpoints"
+  output_dir: "/mnt/data/models/checkpoints/20M"
   save_total_limit: 3
   evaluate_before_training: false  # Set to true only if you have enough memory (can cause OOM)
   skip_fsdp_verification: true
   save_safetensors: true  # Use safetensors for faster checkpoint saving (enabled by default)
-  save_only_model: false
-
+  save_only_model: false 
+   
  # FSDP Configuration for distributed training
 fsdp:
   sharding_strategy: "FULL_SHARD"  # Shard model across all GPUs for optimal NVLink utilization
@@ -55,9 +55,9 @@ mlflow:
 
 # Performance optimization
 performance:
-  dataloader_num_workers: 12 # Optimized - too many workers (36) causes overhead and context switching (now 4)
+  dataloader_num_workers: 8 # Optimized - too many workers (36) causes overhead and context switching (now 4)
   pin_memory: true  # ENABLED - faster CPU to GPU transfers
-  prefetch_factor: 8  # Optimized - too high (30) causes memory overhead (now 2)
+  prefetch_factor: 16  # Optimized - too high (30) causes memory overhead (now 2)
   persistent_workers: true  # ENABLED - avoid worker restart overhead
   use_cpu_offload: false  # DISABLED - keep optimizer states on GPU for NVLink communication
   activation_checkpointing: true  # Already enabled via model.gradient_checkpointing

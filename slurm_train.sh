@@ -34,6 +34,12 @@ source "$VENV_PATH"
 export TORCH_DISTRIBUTED_BACKEND=nccl
 export PYTHONUNBUFFERED=1
 
+# NCCL timeout settings to prevent watchdog timeouts
+# Increase heartbeat timeout to handle long-running operations (default is 480s)
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
+# Optional: Uncomment the line below to disable NCCL monitoring if timeout issues persist
+# export TORCH_NCCL_ENABLE_MONITORING=0
+
 # Get master node IP
 MASTER_NODE=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 MASTER_ADDR=$(getent hosts $MASTER_NODE 2>/dev/null | awk '{print $1}' | head -n 1)
