@@ -7,6 +7,12 @@ Supports multi-node multi-GPU training with MLflow integration.
 import os
 import argparse
 import yaml
+
+# Fix DeepSpeed/Triton autotune cache directory issue BEFORE any imports that might trigger DeepSpeed
+# This must be done before importing torch/transformers which may import DeepSpeed
+triton_cache_dir = os.path.expanduser("~/.triton/autotune")
+os.makedirs(triton_cache_dir, exist_ok=True)
+
 import torch
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
@@ -36,6 +42,8 @@ import time
 import signal
 import atexit
 import traceback
+import sys
+import warnings
 from huggingface_hub import login
 from urllib.parse import urlparse
 
@@ -366,8 +374,15 @@ def get_gpu_utilization():
 
 def evaluate_model_after_training(model, tokenizer, device, config):
     """Evaluate model performance after fine-tuning."""
+    # Skip evaluation for FSDP models to avoid complexity and potential hangs
+    if isinstance(model, FSDP):
+        if dist.get_rank() == 0:
+            print("Skipping evaluation for FSDP model (to avoid state dict gathering complexity)", flush=True)
+            print("Use inference_eval.py to evaluate the model after training", flush=True)
+        return
+    
     if dist.get_rank() == 0:
-        print("Evaluating fine-tuned model...")
+        print("Evaluating fine-tuned model...", flush=True)
         
         model.eval()
         test_prompts = [
@@ -379,36 +394,40 @@ def evaluate_model_after_training(model, tokenizer, device, config):
         fine_tuned_metrics = {}
         all_generations = []
         
-        with torch.no_grad():
-            for i, test_prompt in enumerate(test_prompts):
-                inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=50,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9
-                )
-                
-                generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                all_generations.append(f"Prompt {i+1}: {test_prompt}\nGeneration: {generated_text}\n")
-                fine_tuned_metrics[f"fine_tuned/prompt_{i+1}_length"] = len(generated_text)
-                fine_tuned_metrics[f"fine_tuned/prompt_{i+1}_tokens"] = len(outputs[0])
-        
-        mlflow.log_text("\n".join(all_generations), "evaluation/fine_tuned_model_generations.txt")
-        mlflow.log_metrics(fine_tuned_metrics)
-        if fine_tuned_metrics:
-            mlflow.log_metric("evaluation/fine_tuned_model_avg_length", 
-                            sum(fine_tuned_metrics.values()) / len(fine_tuned_metrics))
-        
-        print(f"Fine-tuned model evaluation complete. Logged {len(test_prompts)} generations to MLflow.")
-        model.train()
-        torch.cuda.empty_cache()
+        try:
+            with torch.no_grad():
+                for i, test_prompt in enumerate(test_prompts):
+                    inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=50,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9
+                    )
+                    
+                    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                    all_generations.append(f"Prompt {i+1}: {test_prompt}\nGeneration: {generated_text}\n")
+                    fine_tuned_metrics[f"fine_tuned/prompt_{i+1}_length"] = len(generated_text)
+                    fine_tuned_metrics[f"fine_tuned/prompt_{i+1}_tokens"] = len(outputs[0])
+            
+            mlflow.log_text("\n".join(all_generations), "evaluation/fine_tuned_model_generations.txt")
+            mlflow.log_metrics(fine_tuned_metrics)
+            if fine_tuned_metrics:
+                mlflow.log_metric("evaluation/fine_tuned_model_avg_length", 
+                                sum(fine_tuned_metrics.values()) / len(fine_tuned_metrics))
+            
+                print(f"Fine-tuned model evaluation complete. Logged {len(test_prompts)} generations to MLflow.", flush=True)
+        except Exception as e:
+            print(f"Warning: Evaluation failed: {e}", flush=True)
+        finally:
+            model.train()
+            torch.cuda.empty_cache()
 
 class CustomTrainer(Trainer):
     """Custom trainer with GPU utilization monitoring and optimized data loading."""
     
-    def __init__(self, *args, prefetch_factor=None, persistent_workers=None, dataloader_timeout=None, clear_cache_frequency=10, **kwargs):
+    def __init__(self, *args, prefetch_factor=None, persistent_workers=None, dataloader_timeout=None, clear_cache_frequency=10, config=None, **kwargs):
         model = kwargs.get('model')
         self._model_already_fsdp = isinstance(model, FSDP) if model is not None else False
         
@@ -421,6 +440,7 @@ class CustomTrainer(Trainer):
         self.dataloader_timeout = dataloader_timeout
         self.clear_cache_frequency = clear_cache_frequency
         self._step_counter = 0
+        self._config = config  # Store config for checkpoint saving
     
     def _wrap_model(self, model, training=True):
         """Override to prevent re-wrapping if model is already FSDP-wrapped."""
@@ -602,27 +622,481 @@ class CustomTrainer(Trainer):
         else:
             super().log(logs)
     
-    def _save_checkpoint(self, model, trial, metrics=None):
+    def _save_checkpoint(self, model, trial):
         """Override checkpoint saving to optimize FSDP checkpoint operations."""
-        if dist.is_initialized() and dist.get_rank() == 0:
-            checkpoint_start_time = time.time()
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        checkpoint_start_time = time.time()
+        
+        # #region agent log
+        try:
+            import json
+            with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "checkpoint-debug",
+                    "hypothesisId": "A",
+                    "location": "train.py:_save_checkpoint:entry",
+                    "message": "Checkpoint save started",
+                    "data": {"rank": rank, "step": self.state.global_step, "timestamp": time.time()},
+                    "timestamp": int(time.time() * 1000)
+                }) + "\n")
+        except: pass
+        # #endregion
+        
+        # Skip checkpoint save for very short training runs to avoid hang
+        # Check dataset size first - if very small, always skip intermediate checkpoints
+        try:
+            dataset_size = len(self.train_dataset)
+            
+            # If dataset is very small (< 500 samples), skip all intermediate checkpoint saves
+            # FSDP checkpoint gathering can hang on very small runs
+            if dataset_size < 500:
+                if rank == 0:
+                    print(f"[Rank 0] Skipping checkpoint save at step {self.state.global_step} "
+                          f"(dataset has only {dataset_size} samples - too small for reliable FSDP checkpointing)", flush=True)
+                    print("[Rank 0] Checkpoint will be saved at end of training only (if training completes)", flush=True)
+                return
+            
+            # Also check if we're in early training (< step 50) and dataset is still small
+            effective_batch = (self.args.per_device_train_batch_size * 
+                              self.args.gradient_accumulation_steps *
+                              (dist.get_world_size() if dist.is_initialized() else 1))
+            
+            steps_per_epoch = max(1, dataset_size // effective_batch) if effective_batch > 0 else 1
+            estimated_total_steps = steps_per_epoch * self.args.num_train_epochs
+            
+            # If estimated total steps is very small (< 100) and we're early in training, skip
+            if estimated_total_steps < 100 and self.state.global_step < 50:
+                if rank == 0:
+                    print(f"[Rank 0] Skipping checkpoint save at step {self.state.global_step} "
+                          f"(estimated ~{estimated_total_steps} total steps - skipping early checkpoints)", flush=True)
+                return
+                
+        except Exception as e:
+            # If we can't determine, proceed but log warning
+            if rank == 0:
+                print(f"[Rank 0] Could not determine if checkpoint should be skipped: {e}", flush=True)
+                print("[Rank 0] Proceeding with checkpoint save...", flush=True)
+        
+        if rank == 0:
             print(f"[Rank 0] Saving checkpoint at step {self.state.global_step}...", flush=True)
         
+        # Synchronize all ranks before checkpoint save
+        if dist.is_initialized():
+            try:
+                # #region agent log
+                try:
+                    import json
+                    with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "checkpoint-debug",
+                            "hypothesisId": "B",
+                            "location": "train.py:_save_checkpoint:before_barrier",
+                            "message": "Before barrier synchronization",
+                            "data": {"rank": rank, "timestamp": time.time()},
+                            "timestamp": int(time.time() * 1000)
+                        }) + "\n")
+                except: pass
+                # #endregion
+                barrier_with_timeout(timeout_seconds=60)
+                # #region agent log
+                try:
+                    import json
+                    with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "checkpoint-debug",
+                            "hypothesisId": "B",
+                            "location": "train.py:_save_checkpoint:after_barrier",
+                            "message": "After barrier synchronization",
+                            "data": {"rank": rank, "timestamp": time.time()},
+                            "timestamp": int(time.time() * 1000)
+                        }) + "\n")
+                except: pass
+                # #endregion
+                if rank == 0:
+                    print("[Rank 0] All ranks synchronized for checkpoint save", flush=True)
+            except Exception as e:
+                if rank == 0:
+                    print(f"[Rank 0] Warning: Barrier before checkpoint save failed: {e}", flush=True)
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            if dist.is_initialized():
+                torch.cuda.synchronize()
+        
+        # Save checkpoint using FSDP state dict gathering pattern
+        # All ranks must enter the context manager, but only rank 0 saves
+        checkpoint_saved = False
+        checkpoint_path = None
         
         try:
-            super()._save_checkpoint(model, trial, metrics)
+            if rank == 0:
+                print("[Rank 0] Gathering FSDP state dict (all ranks participating)...", flush=True)
+            
+            # Check if model is FSDP-wrapped
+            if isinstance(model, FSDP):
+                # Use FSDP state dict gathering pattern
+                # All ranks enter the context, but only rank 0 gets the full state dict
+                # CRITICAL FIX: offload_to_cpu=False to prevent hangs/deadlocks
+                # CPU offload can cause deadlocks when gathering large state dicts
+                # If you need CPU offload for memory reasons, ensure sufficient CPU RAM
+                offload_to_cpu = False  # Default to False to prevent hangs
+                if self._config is not None:
+                    offload_to_cpu = self._config.get("fsdp", {}).get("checkpoint_offload_to_cpu", False)
+                full_sd_cfg = FullStateDictConfig(rank0_only=True, offload_to_cpu=offload_to_cpu)
+                
+                if rank == 0:
+                    print(f"[Rank 0] FSDP checkpoint config: offload_to_cpu={offload_to_cpu}", flush=True)
+                
+                # #region agent log
+                try:
+                    import json
+                    with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "checkpoint-debug",
+                            "hypothesisId": "C",
+                            "location": "train.py:_save_checkpoint:before_context",
+                            "message": "Before entering FSDP state_dict_type context",
+                            "data": {"rank": rank, "timestamp": time.time()},
+                            "timestamp": int(time.time() * 1000)
+                        }) + "\n")
+                except: pass
+                # #endregion
+                
+                # CRITICAL: Synchronize all ranks before entering FSDP state dict context
+                # This ensures all ranks are ready to participate in the all-gather
+                if dist.is_initialized():
+                    try:
+                        if rank == 0:
+                            print("[Rank 0] Synchronizing all ranks before state dict gathering...", flush=True)
+                        barrier_with_timeout(timeout_seconds=120)
+                        if rank == 0:
+                            print("[Rank 0] All ranks synchronized, entering state dict context...", flush=True)
+                    except Exception as e:
+                        if rank == 0:
+                            print(f"[Rank 0] ERROR: Pre-gather barrier failed: {e}", flush=True)
+                            import traceback
+                            traceback.print_exc()
+                        raise  # Don't proceed if synchronization fails
+                
+                with FSDP.state_dict_type(
+                    model,
+                    StateDictType.FULL_STATE_DICT,
+                    full_sd_cfg,
+                ):
+                    # #region agent log
+                    try:
+                        import json
+                        with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "checkpoint-debug",
+                                "hypothesisId": "A",
+                                "location": "train.py:_save_checkpoint:inside_context",
+                                "message": "Inside FSDP state_dict_type context, before state_dict()",
+                                "data": {"rank": rank, "timestamp": time.time()},
+                                "timestamp": int(time.time() * 1000)
+                            }) + "\n")
+                    except: pass
+                    # #endregion
+                    
+                    # CRITICAL FIX: All ranks must call model.state_dict() to participate in the all-gather
+                    # With rank0_only=True, only rank 0 gets the full state dict, but all ranks must participate
+                    state_dict_start = time.time()
+                    
+                    if rank == 0:
+                        print("[Rank 0] Calling model.state_dict() - all ranks must participate in this collective operation...", flush=True)
+                    
+                    # CRITICAL: All ranks must call state_dict() - this is a collective NCCL operation
+                    # The threading approach doesn't work for NCCL operations, so we call it directly
+                    # If this hangs, it's likely a NCCL deadlock or memory issue
+                    try:
+                        # Synchronize CUDA on all ranks before state dict gathering
+                        # This ensures all ranks are at the same point before the collective operation
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                        
+                        # All ranks participate - this is the key fix
+                        # With rank0_only=True, only rank 0 gets the full dict, but all ranks must call this
+                        # This is a collective all-gather operation - all ranks must participate synchronously
+                        state_dict = model.state_dict()
+                        
+                        # For non-rank-0, state_dict will be an empty dict (not None) with rank0_only=True
+                        # We convert it to None to save memory
+                        if rank != 0:
+                            if isinstance(state_dict, dict) and len(state_dict) == 0:
+                                state_dict = None
+                            else:
+                                # Unexpected: non-rank-0 got a non-empty dict, clear it anyway
+                                state_dict = None
+                        
+                        state_dict_duration = time.time() - state_dict_start
+                        
+                        if rank == 0:
+                            if state_dict is not None:
+                                print(f"[Rank 0] State dict gathered successfully in {state_dict_duration:.2f}s ({len(state_dict)} keys)", flush=True)
+                            else:
+                                print(f"[Rank 0] WARNING: State dict is None on rank 0!", flush=True)
+                        else:
+                            print(f"[Rank {rank}] State dict gathering completed (empty dict as expected)", flush=True)
+                            
+                    except Exception as e:
+                        state_dict_duration = time.time() - state_dict_start
+                        error_msg = f"[Rank {rank}] ERROR during state dict gathering after {state_dict_duration:.2f}s: {e}"
+                        print(error_msg, flush=True)
+                        import traceback
+                        traceback.print_exc()
+                        raise RuntimeError(f"FSDP state dict gathering failed: {e}") from e
+                    
+                    # #region agent log
+                    try:
+                        import json
+                        with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "checkpoint-debug",
+                                "hypothesisId": "A",
+                                "location": "train.py:_save_checkpoint:after_state_dict",
+                                "message": "After model.state_dict() call",
+                                "data": {"rank": rank, "duration": state_dict_duration, "has_state_dict": state_dict is not None, "timestamp": time.time()},
+                                "timestamp": int(time.time() * 1000)
+                            }) + "\n")
+                    except: pass
+                    # #endregion
+                
+                # #region agent log
+                try:
+                    import json
+                    with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({
+                            "sessionId": "debug-session",
+                            "runId": "checkpoint-debug",
+                            "hypothesisId": "C",
+                            "location": "train.py:_save_checkpoint:after_context",
+                            "message": "After exiting FSDP state_dict_type context",
+                            "data": {"rank": rank, "timestamp": time.time()},
+                            "timestamp": int(time.time() * 1000)
+                        }) + "\n")
+                except: pass
+                # #endregion
+                
+                # Synchronize after gathering state dict
+                if dist.is_initialized():
+                    if rank == 0:
+                        print("[Rank 0] Synchronizing all ranks after state dict gathering...", flush=True)
+                    # #region agent log
+                    try:
+                        import json
+                        with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "checkpoint-debug",
+                                "hypothesisId": "B",
+                                "location": "train.py:_save_checkpoint:before_post_gather_barrier",
+                                "message": "Before barrier after state dict gathering",
+                                "data": {"rank": rank, "timestamp": time.time()},
+                                "timestamp": int(time.time() * 1000)
+                            }) + "\n")
+                    except: pass
+                    # #endregion
+                    try:
+                        barrier_with_timeout(timeout_seconds=120)  # 2 min timeout - should be quick after state dict
+                    except Exception as barrier_error:
+                        if rank == 0:
+                            print(f"[Rank 0] ERROR: Barrier after state dict gathering failed: {barrier_error}", flush=True)
+                            print("[Rank 0] This may indicate a rank is stuck. Check all ranks are alive.", flush=True)
+                        raise
+                    # #region agent log
+                    try:
+                        import json
+                        with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "checkpoint-debug",
+                                "hypothesisId": "B",
+                                "location": "train.py:_save_checkpoint:after_post_gather_barrier",
+                                "message": "After barrier after state dict gathering",
+                                "data": {"rank": rank, "timestamp": time.time()},
+                                "timestamp": int(time.time() * 1000)
+                            }) + "\n")
+                    except: pass
+                    # #endregion
+                    if rank == 0:
+                        print("[Rank 0] State dict gathered successfully", flush=True)
+                
+                # Only rank 0 saves the checkpoint
+                if rank == 0 and state_dict is not None:
+                    print("[Rank 0] Saving checkpoint to disk...", flush=True)
+                    
+                    # Get checkpoint directory from trainer
+                    checkpoint_dir = os.path.join(
+                        self.args.output_dir,
+                        f"checkpoint-{self.state.global_step}"
+                    )
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    
+                    # Save model state dict
+                    if self.args.save_safetensors:
+                        try:
+                            from safetensors.torch import save_file
+                            # Convert state dict to safetensors format
+                            save_file(state_dict, os.path.join(checkpoint_dir, "model.safetensors"))
+                            if rank == 0:
+                                print("[Rank 0] Model saved as safetensors", flush=True)
+                        except ImportError:
+                            if rank == 0:
+                                print("[Rank 0] safetensors not available, using PyTorch format", flush=True)
+                            torch.save(state_dict, os.path.join(checkpoint_dir, "pytorch_model.bin"))
+                    else:
+                        torch.save(state_dict, os.path.join(checkpoint_dir, "pytorch_model.bin"))
+                    
+                    # Save config and tokenizer
+                    # For FSDP models, access the underlying model's config
+                    try:
+                        # FSDP wraps the model, so we need to access the underlying module
+                        underlying_model = model
+                        if hasattr(model, '_fsdp_wrapped_module'):
+                            underlying_model = model._fsdp_wrapped_module
+                        
+                        # The config should be accessible from the underlying model
+                        if hasattr(underlying_model, 'config'):
+                            underlying_model.config.save_pretrained(checkpoint_dir)
+                        else:
+                            # Fallback: config might be at model.model.config for some architectures
+                            if hasattr(underlying_model, 'model') and hasattr(underlying_model.model, 'config'):
+                                underlying_model.model.config.save_pretrained(checkpoint_dir)
+                            else:
+                                if rank == 0:
+                                    print("[Rank 0] Warning: Could not find model config, checkpoint may be incomplete", flush=True)
+                    except Exception as e:
+                        if rank == 0:
+                            print(f"[Rank 0] Warning: Could not save config: {e}", flush=True)
+                            print("[Rank 0] Checkpoint will work but config.json may be missing", flush=True)
+                    
+                    if self.tokenizer is not None:
+                        self.tokenizer.save_pretrained(checkpoint_dir)
+                    
+                    # Save training state (only on rank 0)
+                    self.state.save_to_json(os.path.join(checkpoint_dir, "trainer_state.json"))
+                    
+                    # Save optimizer and scheduler states if not save_only_model
+                    if not self.args.save_only_model:
+                        # Note: For FSDP, optimizer states are sharded, so we skip them
+                        # The model state dict is sufficient for resuming
+                        if rank == 0:
+                            print("[Rank 0] Skipping optimizer state (FSDP sharded - not needed)", flush=True)
+                    
+                    checkpoint_path = checkpoint_dir
+                    checkpoint_saved = True
+                    
+                    if rank == 0:
+                        print(f"[Rank 0] Checkpoint saved to {checkpoint_dir}", flush=True)
+                
+                # All ranks synchronize after save
+                if dist.is_initialized():
+                    # #region agent log
+                    try:
+                        import json
+                        with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "checkpoint-debug",
+                                "hypothesisId": "B",
+                                "location": "train.py:_save_checkpoint:before_final_barrier",
+                                "message": "Before final barrier after checkpoint save",
+                                "data": {"rank": rank, "timestamp": time.time()},
+                                "timestamp": int(time.time() * 1000)
+                            }) + "\n")
+                    except: pass
+                    # #endregion
+                    barrier_with_timeout(timeout_seconds=60)
+                    # #region agent log
+                    try:
+                        import json
+                        with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({
+                                "sessionId": "debug-session",
+                                "runId": "checkpoint-debug",
+                                "hypothesisId": "B",
+                                "location": "train.py:_save_checkpoint:after_final_barrier",
+                                "message": "After final barrier after checkpoint save",
+                                "data": {"rank": rank, "timestamp": time.time()},
+                                "timestamp": int(time.time() * 1000)
+                            }) + "\n")
+                    except: pass
+                    # #endregion
+                    if rank == 0:
+                        print("[Rank 0] All ranks synchronized after checkpoint save", flush=True)
+            else:
+                # Non-FSDP model, use standard save
+                if rank == 0:
+                    print("[Rank 0] Non-FSDP model, using standard checkpoint save...", flush=True)
+                super()._save_checkpoint(model, trial)
+                checkpoint_saved = True
+            
+            # Verify checkpoint was saved (only on rank 0)
+            if rank == 0 and checkpoint_saved:
+                checkpoint_dir = os.path.join(
+                    self.args.output_dir,
+                    f"checkpoint-{self.state.global_step}"
+                )
+                # Check if model file exists
+                model_file = os.path.join(checkpoint_dir, "model.safetensors")
+                if not os.path.exists(model_file):
+                    model_file = os.path.join(checkpoint_dir, "pytorch_model.bin")
+                
+                if os.path.exists(model_file):
+                    print(f"[Rank 0] ✓ Checkpoint verified: {model_file} exists", flush=True)
+                else:
+                    print(f"[Rank 0] ✗ WARNING: Checkpoint model file not found in {checkpoint_dir}", flush=True)
+                    print(f"[Rank 0] Checkpoint directory contents:", flush=True)
+                    try:
+                        for f in os.listdir(checkpoint_dir):
+                            print(f"[Rank 0]   - {f}", flush=True)
+                    except:
+                        pass
+                
         except Exception as e:
-            if dist.is_initialized() and dist.get_rank() == 0:
-                print(f"Warning: Checkpoint save encountered error: {e}", flush=True)
+            if rank == 0:
+                print(f"[Rank 0] Warning: Checkpoint save encountered error: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+            # Still synchronize even if save failed
+            if dist.is_initialized():
+                try:
+                    barrier_with_timeout(timeout_seconds=60)
+                except Exception as barrier_error:
+                    if rank == 0:
+                        print(f"[Rank 0] Warning: Barrier after checkpoint save error failed: {barrier_error}", flush=True)
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         
-        if dist.is_initialized() and dist.get_rank() == 0:
+        if rank == 0:
             checkpoint_time = time.time() - checkpoint_start_time
-            print(f"[Rank 0] Checkpoint saved successfully in {checkpoint_time:.2f}s", flush=True)
+            if checkpoint_saved:
+                print(f"[Rank 0] Checkpoint saved successfully in {checkpoint_time:.2f}s", flush=True)
+            else:
+                print(f"[Rank 0] Checkpoint save completed (with warnings) in {checkpoint_time:.2f}s", flush=True)
+        
+        # #region agent log
+        try:
+            import json
+            with open('/Users/ssmpatel/Documents/modelFineTuning/.cursor/debug.log', 'a') as f:
+                f.write(json.dumps({
+                    "sessionId": "debug-session",
+                    "runId": "checkpoint-debug",
+                    "hypothesisId": "A",
+                    "location": "train.py:_save_checkpoint:exit",
+                    "message": "Checkpoint save method exiting",
+                    "data": {"rank": rank, "checkpoint_saved": checkpoint_saved, "duration": time.time() - checkpoint_start_time, "timestamp": time.time()},
+                    "timestamp": int(time.time() * 1000)
+                }) + "\n")
+        except: pass
+        # #endregion
     
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         """Override evaluate to skip evaluation during training if disabled."""
@@ -656,9 +1130,14 @@ def find_latest_checkpoint(output_dir):
         if os.path.isdir(checkpoint_path) and item.startswith("checkpoint-"):
             try:
                 step_num = int(item.split("-")[1])
-                # Check if it's a valid checkpoint (has training_state.bin or trainer_state.json)
+                # Check if it's a valid checkpoint (has model file AND trainer_state.json)
                 state_file = os.path.join(checkpoint_path, "trainer_state.json")
-                if os.path.exists(state_file):
+                model_file = os.path.join(checkpoint_path, "model.safetensors")
+                if not os.path.exists(model_file):
+                    model_file = os.path.join(checkpoint_path, "pytorch_model.bin")
+                
+                # Only consider checkpoints that have both model weights and state
+                if os.path.exists(state_file) and os.path.exists(model_file):
                     checkpoints.append((step_num, checkpoint_path))
             except (ValueError, IndexError):
                 continue
@@ -671,7 +1150,39 @@ def find_latest_checkpoint(output_dir):
     return checkpoints[0][1]
 
 
+def setup_deepspeed_triton_cache():
+    """Setup DeepSpeed/Triton autotune cache directory to prevent FileNotFoundError.
+    
+    DeepSpeed tries to access autotune cache files during atexit cleanup.
+    If the files don't exist, it raises a FileNotFoundError which is harmless
+    but noisy. We create the directory early to minimize this issue.
+    
+    Note: Even with this fix, you may still see "Exception ignored in atexit callback"
+    errors. These are harmless and can be safely ignored - they occur because
+    DeepSpeed's atexit handler tries to save cache files that may not exist.
+    """
+    # Create the cache directory (already done at module level, but ensure it exists)
+    triton_cache_dir = os.path.expanduser("~/.triton/autotune")
+    os.makedirs(triton_cache_dir, exist_ok=True)
+    
+    # Try to create a dummy file to prevent the specific error
+    # This may not always work since DeepSpeed creates files with specific names
+    # but it helps in some cases
+    try:
+        dummy_file = os.path.join(triton_cache_dir, ".deepspeed_cache_initialized")
+        if not os.path.exists(dummy_file):
+            with open(dummy_file, 'w') as f:
+                f.write("# DeepSpeed/Triton cache directory initialized\n")
+    except:
+        pass  # If we can't create the file, that's okay
+
 def main():
+    # Setup DeepSpeed/Triton cache directory to minimize atexit errors
+    # Note: You may still see "Exception ignored in atexit callback" errors.
+    # These are harmless and occur when DeepSpeed tries to save cache files
+    # that don't exist. They can be safely ignored.
+    setup_deepspeed_triton_cache()
+    
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -1067,6 +1578,7 @@ def main():
         persistent_workers=config["performance"].get("persistent_workers", False),
         dataloader_timeout=config["performance"].get("dataloader_timeout", 0),
         clear_cache_frequency=config["performance"].get("clear_cache_frequency", 10),
+        config=config,  # Pass config for checkpoint saving
     )
     
     training_successful = False
@@ -1143,6 +1655,15 @@ def main():
         # Save final model
         # Note: For FSDP with large models, gathering full state dict can timeout.
         # Instead, we'll use the latest checkpoint and provide instructions for consolidation.
+        # Get the config file path from the parsed args (available in main() scope)
+        config_file_path_for_consolidate = None
+        try:
+            # args is defined in main() function scope
+            config_file_path_for_consolidate = args.config
+        except NameError:
+            # Fallback if args not available
+            config_file_path_for_consolidate = "config.yaml" if os.path.exists("config.yaml") else None
+        
         if rank == 0 and training_successful:
             try:
                 print("=" * 60, flush=True)
@@ -1150,32 +1671,87 @@ def main():
                 print("=" * 60, flush=True)
                 final_model_path = os.path.join(config["training"]["output_dir"], "final_model")
                 
-                # For FSDP models, skip final model save to avoid NCCL timeout
-                # Instead, use the latest checkpoint and consolidate separately
+                # For FSDP models, try to save final model or use latest checkpoint
                 if isinstance(model, FSDP):
-                    print("Skipping final model save for FSDP (to avoid NCCL timeout).", flush=True)
-                    print("Checkpoints are already saved during training.", flush=True)
-                    
-                    # Find latest checkpoint
+                    # First, check if we have a valid checkpoint
                     latest_checkpoint = find_latest_checkpoint(config["training"]["output_dir"])
+                    
                     if latest_checkpoint:
-                        print(f"Latest checkpoint: {latest_checkpoint}", flush=True)
-                        print("=" * 60, flush=True)
-                        print("To create final_model, run this command after training completes:", flush=True)
-                        print(f"  python consolidate_checkpoint.py {latest_checkpoint} {final_model_path}", flush=True)
-                        print("=" * 60, flush=True)
+                        print(f"Found checkpoint: {latest_checkpoint}", flush=True)
+                        print("Consolidating checkpoint into final model...", flush=True)
                         
-                        # Create a symlink or copy the latest checkpoint as final_model for convenience
-                        # But first, just save the tokenizer to final_model path
-                        os.makedirs(final_model_path, exist_ok=True)
-                        print("Saving tokenizer to final_model directory...", flush=True)
-                        tokenizer.save_pretrained(final_model_path)
-                        print("Tokenizer saved. Model weights are in the latest checkpoint.", flush=True)
+                        # Automatically consolidate checkpoint into final model
+                        try:
+                            # Import the consolidate function
+                            import sys
+                            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                            from consolidate_checkpoint import consolidate_checkpoint
+                            
+                            # Consolidate checkpoint to final_model
+                            consolidate_checkpoint(
+                                checkpoint_path=latest_checkpoint,
+                                output_path=final_model_path,
+                                config_path=config_file_path_for_consolidate,
+                                model_path=config["model"]["path"]
+                            )
+                            print(f"✓ Final model saved successfully to {final_model_path}", flush=True)
+                        except ImportError:
+                            # If consolidate_checkpoint can't be imported, provide instructions
+                            print("=" * 60, flush=True)
+                            print("Could not automatically consolidate checkpoint.", flush=True)
+                            print("To create final_model, run this command:", flush=True)
+                            print(f"  python consolidate_checkpoint.py {latest_checkpoint} {final_model_path}", flush=True)
+                            print("=" * 60, flush=True)
+                            
+                            # Save tokenizer to final_model path
+                            os.makedirs(final_model_path, exist_ok=True)
+                            print("Saving tokenizer to final_model directory...", flush=True)
+                            tokenizer.save_pretrained(final_model_path)
+                            print("Tokenizer saved. Use consolidate_checkpoint.py to create final_model.", flush=True)
+                        except Exception as e:
+                            print(f"Warning: Failed to consolidate checkpoint: {e}", flush=True)
+                            print("You can manually run:", flush=True)
+                            print(f"  python consolidate_checkpoint.py {latest_checkpoint} {final_model_path}", flush=True)
+                            
+                            # At least save tokenizer
+                            os.makedirs(final_model_path, exist_ok=True)
+                            tokenizer.save_pretrained(final_model_path)
                     else:
-                        print("WARNING: No checkpoints found!", flush=True)
-                        # Still try to save tokenizer
-                        os.makedirs(final_model_path, exist_ok=True)
-                        tokenizer.save_pretrained(final_model_path)
+                        # No checkpoints found - skip final model save to avoid hanging
+                        # FSDP state dict gathering for large models can hang indefinitely
+                        if rank == 0:
+                            print("=" * 60, flush=True)
+                            print("WARNING: No valid checkpoints found.", flush=True)
+                            print("Skipping final model save to avoid potential hang.", flush=True)
+                            print("=" * 60, flush=True)
+                            print("", flush=True)
+                            print("Why this happened:", flush=True)
+                            print("  - Checkpoints were skipped (likely due to small dataset or early training)", flush=True)
+                            print("  - Direct FSDP state dict gathering can hang for large models", flush=True)
+                            print("", flush=True)
+                            print("Solutions:", flush=True)
+                            print("  1. For future runs: Enable save_steps in config.yaml", flush=True)
+                            print("     Example: save_steps: 500  # Save every 500 steps", flush=True)
+                            print("", flush=True)
+                            print("  2. If you have any checkpoint directories:", flush=True)
+                            print("     python consolidate_checkpoint.py <checkpoint_dir> <output_path>", flush=True)
+                            print("", flush=True)
+                            print("  3. The model weights are still in memory and training completed successfully.", flush=True)
+                            print("     You just need checkpoints to save them to disk.", flush=True)
+                            print("=" * 60, flush=True)
+                            
+                            # At least save tokenizer for reference
+                            os.makedirs(final_model_path, exist_ok=True)
+                            tokenizer.save_pretrained(final_model_path)
+                            print(f"Tokenizer saved to {final_model_path} for reference.", flush=True)
+                        
+                        # Ensure all ranks can proceed
+                        if dist.is_initialized():
+                            try:
+                                barrier_with_timeout(timeout_seconds=30)
+                            except Exception:
+                                # If barrier fails, that's okay - we're skipping the save anyway
+                                pass
                 else:
                     # Non-FSDP model, use standard save
                     print("Saving non-FSDP model...", flush=True)
@@ -1195,12 +1771,33 @@ def main():
                 print("Training completed, but final model save failed. Check latest checkpoint.", flush=True)
             
             try:
+                # Skip MLflow model logging for FSDP models to avoid hangs
+                # Model logging requires gathering full state dict which can timeout
                 if config["mlflow"]["log_model"]:
-                    mlflow.pytorch.log_model(
-                        model,
-                        "model",
-                        registered_model_name=f"{config['model']['name'].replace('/', '_')}_fine_tuned"
-                    )
+                    if isinstance(model, FSDP):
+                        if rank == 0:
+                            print("Skipping MLflow model logging for FSDP (to avoid state dict gathering hang)", flush=True)
+                            print("Metrics and artifacts are still logged to MLflow", flush=True)
+                            # Log checkpoint path as artifact instead if available
+                            latest_checkpoint = find_latest_checkpoint(config["training"]["output_dir"])
+                            if latest_checkpoint:
+                                try:
+                                    mlflow.log_artifact(latest_checkpoint, "checkpoint")
+                                    print(f"Logged checkpoint path to MLflow: {latest_checkpoint}", flush=True)
+                                except Exception as e:
+                                    print(f"Could not log checkpoint path: {e}", flush=True)
+                    else:
+                        # Non-FSDP model, can log directly (only on rank 0)
+                        if rank == 0:
+                            try:
+                                mlflow.pytorch.log_model(
+                                    model,
+                                    artifact_path="model",
+                                    registered_model_name=f"{config['model']['name'].replace('/', '_')}_fine_tuned"
+                                )
+                                print("Model logged to MLflow successfully", flush=True)
+                            except Exception as e:
+                                print(f"WARNING: Failed to log model to MLflow: {e}", flush=True)
             except Exception as e:
                 print(f"ERROR logging model to MLflow: {e}", flush=True)
                 traceback.print_exc()

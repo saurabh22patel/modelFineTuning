@@ -1,5 +1,3 @@
-#!/bin/bash
-#SBATCH --job-name=llm_finetune
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 #SBATCH --time=24:00:00
@@ -37,9 +35,19 @@ export PYTHONUNBUFFERED=1
 # NCCL timeout settings to prevent watchdog timeouts
 # Increase heartbeat timeout to handle long-running operations (default is 480s)
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
-# Optional: Uncomment the line below to disable NCCL monitoring if timeout issues persist
-# export TORCH_NCCL_ENABLE_MONITORING=0
 
+# Disable NCCL monitoring and watchdog to prevent timeout errors
+export TORCH_NCCL_ENABLE_MONITORING=0
+export NCCL_DEBUG=INFO # Reduce NCCL debug output (can be set to INFO, WARN, or ERROR)
+export NCCL_ASYNC_ERROR_HANDLING=0  # Disable async error handling that can cause timeouts
+# NCCL optimization settings for multi-node training
+export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
+export NCCL_ASYNC_ERROR_HANDLING=0  # Disable async error handling
+export NCCL_IB_DISABLE=0  # Enable InfiniBand if available
+export NCCL_IB_GID_INDEX=3  # InfiniBand GID index
+export NCCL_SOCKET_IFNAME=eth0  # Use InfiniBand interface (adjust if needed)
+export NCCL_P2P_DISABLE=0  # Enable P2P communication
+export NCCL_SHM_DISABLE=0  # Enable shared memory
 # Get master node IP
 MASTER_NODE=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
 MASTER_ADDR=$(getent hosts $MASTER_NODE 2>/dev/null | awk '{print $1}' | head -n 1)

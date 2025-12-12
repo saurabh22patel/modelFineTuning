@@ -4,7 +4,7 @@ dataset:
   batch_size_per_device: 10  # Optimized for GPU utilization (was 6, now 8)
   gradient_accumulation_steps: 3  # Reduced to improve GPU utilization (was 64, now 8 - too high causes idle time)
   max_length: 2048  # Doubled to increase compute per batch and better utilize GPU (was 1024, now 2048)
-  path: "/home/data/datasets/2048/20M"  # UPDATE THIS to your actual dataset path
+  path: "/home/data/datasets/2048/200k"  # UPDATE THIS to your actual dataset path (currently using 200k dataset with 97 samples)
 
 # Model Configuration
 model:
@@ -21,7 +21,7 @@ training:
   weight_decay: 0.01
   max_grad_norm: 1.0
   lr_scheduler_type: "cosine"
-  save_steps: 200
+  save_steps: 999999  # Disable intermediate checkpoints for small test runs (code will skip anyway for < 500 samples)
   eval_steps: 200
   logging_steps: 10
   output_dir: "/mnt/data/models/checkpoints/20M"
@@ -29,7 +29,7 @@ training:
   evaluate_before_training: false  # Set to true only if you have enough memory (can cause OOM)
   skip_fsdp_verification: true
   save_safetensors: true  # Use safetensors for faster checkpoint saving (enabled by default)
-  save_only_model: false 
+  save_only_model: true  # Faster checkpoint saves (only model, not optimizer) 
    
  # FSDP Configuration for distributed training
 fsdp:
