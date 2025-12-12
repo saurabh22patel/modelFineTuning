@@ -525,9 +525,11 @@ class CustomTrainer(Trainer):
             
             if dist.get_rank() == 0 and len(self.gpu_utilizations) % 10 == 0:
                 try:
-                    avg_util = sum(self.gpu_utilizations[-10:]) / 10
-                    mlflow.log_metric("training/avg_gpu_utilization", avg_util, step=self.state.global_step)
-                    print(f"Step {self.state.global_step}: GPU Utilization: {avg_util:.2f}%")
+                    recent_utils = [u for u in self.gpu_utilizations[-10:] if u > 0]
+                    if recent_utils:
+                        avg_util = sum(recent_utils) / len(recent_utils)
+                        mlflow.log_metric("training/avg_gpu_utilization", avg_util, step=self.state.global_step)
+                        print(f"Step {self.state.global_step}: GPU Utilization: {avg_util:.2f}%")
                 except Exception:
                     pass
         
@@ -1809,15 +1811,17 @@ def main():
             
             try:
                 if trainer.gpu_utilizations:
-                    avg_util = sum(trainer.gpu_utilizations) / len(trainer.gpu_utilizations)
-                    min_util = min(trainer.gpu_utilizations)
-                    max_util = max(trainer.gpu_utilizations)
-                    mlflow.log_metrics({
-                        "training/final_avg_gpu_utilization": avg_util,
-                        "training/min_gpu_utilization": min_util,
-                        "training/max_gpu_utilization": max_util
-                    })
-                    print(f"\nGPU Utilization Stats: Avg={avg_util:.2f}%, Min={min_util:.2f}%, Max={max_util:.2f}%")
+                    non_zero_utils = [u for u in trainer.gpu_utilizations if u > 0]
+                    if non_zero_utils:
+                        avg_util = sum(non_zero_utils) / len(non_zero_utils)
+                        min_util = min(non_zero_utils)
+                        max_util = max(non_zero_utils)
+                        mlflow.log_metrics({
+                            "training/final_avg_gpu_utilization": avg_util,
+                            "training/min_gpu_utilization": min_util,
+                            "training/max_gpu_utilization": max_util
+                        })
+                        print(f"\nGPU Utilization Stats: Avg={avg_util:.2f}%, Min={min_util:.2f}%, Max={max_util:.2f}%")
             except Exception as e:
                 print(f"WARNING: Failed to log GPU stats: {e}", flush=True)
             
