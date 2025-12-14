@@ -12,7 +12,7 @@ model:
   path: "/mnt/data/models/1b"  # UPDATE THIS to your actual model path or HF repo ID
   use_flash_attention: false # ENABLED - reduces memory and allows larger batches (CRITICAL for performance)
   gradient_checkpointing: true  # Enable gradient checkpointing for memory efficiency
-  hf_token: "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"  # HuggingFace token for gated models (or set via HF_TOKEN env var)
+  hf_token: "hf_"  # HuggingFace token for gated models (or set via HF_TOKEN env var)
 
 training:
   num_epochs: 3
